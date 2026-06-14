@@ -47,7 +47,7 @@ async def send_poll(chat_id, question, options, correct_index):
 #         wait_quiz_choice, wait_delete_choice, in_quiz
 
 async def handle_update(update, data):
-    # Poll answer
+    # Poll answer (when user answers a quiz)
     if "poll_answer" in update:
         await handle_poll_answer(update["poll_answer"], data)
         return
@@ -59,6 +59,11 @@ async def handle_update(update, data):
     chat_id = msg["chat"]["id"]
     user_id = str(msg["from"]["id"])
     text = msg.get("text", "").strip()
+
+    # ── Пользователь отправил опрос боту ──
+    if "poll" in msg:
+        await handle_incoming_poll(msg, user_id, chat_id, data)
+        return
 
     states = data.setdefault("user_state", {})
     state = states.get(user_id, {})
@@ -124,6 +129,23 @@ async def handle_update(update, data):
             states[user_id] = {"step": "wait_delete_choice"}
             save_data(data)
             await send(chat_id, f"🗑 *Какую удалить? Введи номер:*\n\n{lines}")
+        return
+
+    if text == "/settitle":
+        state = states.get(user_id, {})
+        if not state.get("questions"):
+            await send(chat_id, "❌ Сначала отправь хотя бы один опрос-викторину!")
+        else:
+            state["step"] = "wait_title_for_poll"
+            save_data(data)
+            await send(chat_id, "✏️ Введи название для викторины:")
+        return
+
+    if current == "wait_title_for_poll":
+        state["title"] = text
+        state["step"] = "wait_more"
+        save_data(data)
+        await send(chat_id, f"✅ Название установлено: *{text}*\n\nОтправь ещё опрос или напиши *2* чтобы сохранить.")
         return
 
     if text == "/cancel":
@@ -294,6 +316,67 @@ async def send_quiz_question(chat_id, user_id, data):
         }
         save_data(data)
 
+async def handle_incoming_poll(msg, user_id, chat_id, data):
+    """Пользователь отправил опрос — сохраняем его как вопрос викторины."""
+    poll = msg["poll"]
+    question_text = poll.get("question", "").strip()
+    options = [o["text"] for o in poll.get("options", [])]
+
+    # Определяем правильный ответ
+    correct_option_id = poll.get("correct_option_id")  # только для quiz-типа
+    poll_type = poll.get("type", "regular")
+
+    states = data.setdefault("user_state", {})
+    state = states.get(user_id, {})
+    current_step = state.get("step", "idle")
+
+    if poll_type == "quiz" and correct_option_id is not None:
+        # Опрос типа "Викторина" — правильный ответ уже задан
+        correct_text = options[correct_option_id]
+
+        question = {
+            "question": question_text,
+            "options": options,
+            "correct_answer": correct_text
+        }
+
+        if current_step == "wait_question" or current_step == "wait_more" or current_step == "idle":
+            # Добавляем вопрос к текущей создаваемой викторине
+            if current_step == "idle":
+                # Начинаем новую викторину автоматически
+                state = {"step": "wait_more", "title": "Викторина", "questions": [question]}
+                states[user_id] = state
+                save_data(data)
+                await send(chat_id,
+                    f"✅ Вопрос добавлен!\n"
+                    f"❓ *{question_text}*\n"
+                    f"Правильный ответ: *{correct_text}*\n\n"
+                    f"Отправь ещё опрос чтобы добавить вопрос,\n"
+                    f"или напиши *2* чтобы сохранить викторину,\n"
+                    f"или /settitle чтобы задать название."
+                )
+            else:
+                state.setdefault("questions", []).append(question)
+                state["step"] = "wait_more"
+                save_data(data)
+                q_num = len(state["questions"])
+                await send(chat_id,
+                    f"✅ Вопрос {q_num} добавлен!\n"
+                    f"❓ *{question_text}*\n"
+                    f"Правильный ответ: *{correct_text}*\n\n"
+                    f"Отправь ещё опрос чтобы добавить вопрос,\n"
+                    f"или напиши *2* чтобы сохранить викторину."
+                )
+        else:
+            await send(chat_id, "⚠️ Сначала начни создание викторины командой /newquiz, или просто отправь опрос ещё раз.")
+    else:
+        # Обычный опрос без правильного ответа
+        await send(chat_id,
+            "⚠️ Это обычный опрос без правильного ответа.\n\n"
+            "Создай опрос типа *Викторина* (с галочкой ✅ на правильном варианте) и отправь снова!\n\n"
+            "Как создать: скрепка 📎 → Опрос → включи *Викторина* → отметь правильный ответ."
+        )
+
 async def handle_poll_answer(poll_answer, data):
     poll_id = poll_answer["poll_id"]
     poll_info = data.get("active_polls", {}).get(poll_id)
@@ -322,7 +405,7 @@ async def main():
     offset = 0
     while True:
         try:
-            result = await api("getUpdates", offset=offset, timeout=30, allowed_updates=["message", "poll_answer"])
+            result = await api("getUpdates", offset=offset, timeout=30, allowed_updates=["message", "poll_answer", "poll"])
             if result.get("ok"):
                 for update in result.get("result", []):
                     offset = update["update_id"] + 1
