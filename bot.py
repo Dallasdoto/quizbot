@@ -12,7 +12,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-DB_FILE = "quizzes.json"
+
+# --- НАСТРОЙКА ПУТИ ДЛЯ НАДЁЖНОГО ХРАНЕНИЯ ДАННЫХ (RAILWAY VOLUME) ---
+# Если папка внешнего диска /app/data существует, сохраняем туда, иначе локально
+DB_DIR = "/app/data"
+if not os.path.exists(DB_DIR):
+    try:
+        os.makedirs(DB_DIR, exist_ok=True)
+    except Exception:
+        DB_DIR = "."
+
+DB_FILE = os.path.join(DB_DIR, "quizzes.json")
+# --------------------------------------------------------------------
 
 # Хранилища состояний в реальном времени
 USER_STATES = {}         # Добавление тестов: user_id -> state data
@@ -571,7 +582,6 @@ async def send_start_message(chat_id):
 
 # --- ОБРАБОТКА ОБНОВЛЕНИЙ ---
 async def handle_update(update):
-    # --- ОБРАБОТКА МГНОВЕННОГО INLINE MODE (СКРИНШОТЫ 1 и 2) ---
     if "inline_query" in update:
         inline_query = update["inline_query"]
         iq_id = inline_query["id"]
@@ -580,7 +590,6 @@ async def handle_update(update):
         
         results = []
         
-        # Если юзер нажал "Поделиться" и пришел запрос вида start_ID
         if query.startswith("start_"):
             quiz_id = query.replace("start_", "", 1)
             quiz = QUIZZES.get(quiz_id)
@@ -614,16 +623,13 @@ async def handle_update(update):
                     "reply_markup": reply_markup
                 })
         else:
-            # Обычный вызов бота по юзернейму @bot_username в любом чате (Скриншот 2)
             user_quizzes = {qid: q for qid, q in QUIZZES.items() if str(q.get("creator_id")) == str(user_id)}
             
-            # Фильтр поиска по названию теста, если юзер ввёл текст
             filtered_quizzes = []
             for qid, q in user_quizzes.items():
                 if not query or query.lower() in q["title"].lower():
                     filtered_quizzes.append((qid, q))
                     
-            # 1. Ссылка-кнопка «Создать новый тест» в самый верх
             results.append({
                 "type": "article",
                 "id": "create_new_quiz_inline",
@@ -635,7 +641,6 @@ async def handle_update(update):
                 }
             })
             
-            # 2. Вывод результатов тестов
             for qid, q in filtered_quizzes:
                 num_q = len(q["questions"])
                 duration = q.get("duration", 30)
@@ -931,7 +936,6 @@ async def handle_update(update):
                     f"{sharing_link}"
                 )
                 
-                # Кнопка "Поделиться" теперь полностью системная нативная!
                 inline_kbd = {
                     "inline_keyboard": [
                         [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
@@ -1054,6 +1058,36 @@ async def handle_update(update):
         user_id = msg["from"]["id"]
         text = msg.get("text", "")
 
+        # --- ОБРАБОТКА ВОССТАНОВЛЕНИЯ БАЗЫ ДАННЫХ ИЗ ФАЙЛА quizzes.json ---
+        if "document" in msg:
+            doc = msg["document"]
+            if doc["file_name"] == "quizzes.json" and chat_type == "private":
+                file_id = doc["file_id"]
+                res_file = await api_request("getFile", {"file_id": file_id})
+                if res_file.get("ok"):
+                    file_path = res_file["result"]["file_path"]
+                    download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+                    
+                    async with httpx.AsyncClient() as c:
+                        file_res = await c.get(download_url)
+                        if file_res.status_code == 200:
+                            try:
+                                new_data = file_res.json()
+                                save_quizzes(new_data)
+                                global QUIZZES
+                                QUIZZES = new_data
+                                await api_request("sendMessage", {
+                                    "chat_id": chat_id,
+                                    "text": "✅ <b>База данных викторин успешно восстановлена из вашего файла резервной копии!</b>",
+                                    "parse_mode": "HTML"
+                                })
+                            except Exception as e:
+                                await api_request("sendMessage", {
+                                    "chat_id": chat_id,
+                                    "text": f"❌ Ошибка: файл имеет неверный формат JSON или поврежден. {e}"
+                                })
+                return
+
         # --- СЦЕНАРИЙ ДЛЯ ГРУПП ---
         if chat_type in ["group", "supergroup"]:
             if text.startswith("/stop"):
@@ -1093,6 +1127,30 @@ async def handle_update(update):
                     })
                 return
 
+            # Команда бэкапа базы данных
+            elif text == "/backup":
+                if os.path.exists(DB_FILE):
+                    try:
+                        with open(DB_FILE, "rb") as f:
+                            files = {"document": ("quizzes.json", f, "application/json")}
+                            async with httpx.AsyncClient() as c:
+                                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+                                response = await c.post(url, data={"chat_id": chat_id, "caption": "📦 Ваша резервная копия базы данных викторин."}, files=files)
+                                res_json = response.json()
+                                if not res_json.get("ok"):
+                                    logging.error(f"Ошибка отправки файла бэкапа: {res_json}")
+                    except Exception as e:
+                        await api_request("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": f"❌ Не удалось создать файл резервной копии: {e}"
+                        })
+                else:
+                    await api_request("sendMessage", {
+                        "chat_id": chat_id,
+                        "text": "📭 База данных еще пуста."
+                    })
+                return
+
         # Поддержка команд /view_ID
         if text.startswith("/view_"):
             quiz_id = text.replace("/view_", "", 1).split("@")[0]
@@ -1104,6 +1162,11 @@ async def handle_update(update):
                 
                 sharing_link = f"t.me/{BOT_USERNAME}?start=start_{quiz_id}"
                 group_url = f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"
+                
+                text_to_share = f"Пройди мой тест «{quiz['title']}»!"
+                encoded_text = urllib.parse.quote(text_to_share)
+                encoded_url = urllib.parse.quote(f"https://t.me/{BOT_USERNAME}?start=start_{quiz_id}")
+                share_url = f"https://t.me/share/url?url={encoded_url}&text={encoded_text}"
 
                 duration = quiz.get("duration", 30)
                 shuffle_mode = quiz.get("shuffle_mode", "all")
@@ -1193,7 +1256,7 @@ async def handle_update(update):
         if text.startswith("/start"):
             parts = text.split(" ")
             if len(parts) > 1:
-                # Если нажали "Создать новый тест" из инлайн-списка
+                # Нажатие кнопки создания нового теста из инлайн-меню
                 if parts[1] == "newquiz":
                     USER_STATES[user_id] = {"state": "AWAITING_TITLE"}
                     await api_request("sendMessage", {
@@ -1201,7 +1264,7 @@ async def handle_update(update):
                         "text": "📝 Введите название вашей новой викторины:"
                     })
                     return
-                # Если перешли по глубокой ссылке
+                # Переход по глубокой ссылке
                 elif parts[1].startswith("start_"):
                     quiz_id = parts[1].replace("start_", "")
                     quiz = QUIZZES.get(quiz_id)
@@ -1212,6 +1275,11 @@ async def handle_update(update):
                         
                         sharing_link = f"t.me/{BOT_USERNAME}?start=start_{quiz_id}"
                         group_url = f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"
+                        
+                        text_to_share = f"Пройди мой тест «{quiz['title']}»!"
+                        encoded_text = urllib.parse.quote(text_to_share)
+                        encoded_url = urllib.parse.quote(f"https://t.me/{BOT_USERNAME}?start=start_{quiz_id}")
+                        share_url = f"https://t.me/share/url?url={encoded_url}&text={encoded_text}"
 
                         duration = quiz.get("duration", 30)
                         shuffle_mode = quiz.get("shuffle_mode", "all")
