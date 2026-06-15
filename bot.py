@@ -232,7 +232,6 @@ async def show_my_quizzes(chat_id, user_id, page=1, edit_message_id=None):
 
 # --- ОДИНОЧНАЯ ИГРА В ЛС (С ТАЙМЕРОМ И АВТОПАУЗОЙ) ---
 async def start_pm_quiz(user_id, user_name, quiz_id, quiz_data):
-    # Применяем режим перемешивания
     shuffle_mode = quiz_data.get("shuffle_mode", "all")
     shuffled_questions = apply_shuffle(quiz_data["questions"], shuffle_mode)
     duration = quiz_data.get("duration", 30)
@@ -264,7 +263,6 @@ async def send_next_pm_question(user_id):
     if not session or session["status"] != "RUNNING":
         return
 
-    # Отменяем предыдущий запущенный таймер если он есть
     if session.get("timer_task"):
         session["timer_task"].cancel()
 
@@ -284,7 +282,7 @@ async def send_next_pm_question(user_id):
         "type": "quiz",
         "correct_option_id": q["correct_option_id"],
         "is_anonymous": False,
-        "open_period": duration  # Запуск колеса таймера у опроса
+        "open_period": duration
     }
     if q.get("explanation"):
         poll_data["explanation"] = q["explanation"]
@@ -294,7 +292,6 @@ async def send_next_pm_question(user_id):
         poll_id = res["result"]["poll"]["id"]
         session["active_poll_id"] = poll_id
         ACTIVE_POLLS[poll_id] = {"chat_id": user_id, "type": "pm"}
-        # Запуск асинхронного таймера на переключение вопроса
         session["timer_task"] = asyncio.create_task(pm_question_timer(user_id, q_idx))
 
 async def pm_question_timer(user_id, question_index):
@@ -313,7 +310,6 @@ async def handle_pm_question_timeout(user_id, question_index):
     else:
         session["unanswered_count"] = 0
 
-    # Автопауза при бездействии соло-игрока (2 пропуска подряд)
     if session["unanswered_count"] >= 2:
         session["status"] = "PAUSED"
         pause_keyboard = {
@@ -557,7 +553,6 @@ async def send_start_message(chat_id):
         ]
     }
     
-    # 1. Принудительно очищаем застрявшую физическую клавиатуру снизу через невидимый пустой месседж
     res_del = await api_request("sendMessage", {
         "chat_id": chat_id,
         "text": "⚙️",
@@ -567,7 +562,6 @@ async def send_start_message(chat_id):
         msg_id = res_del["result"]["message_id"]
         await api_request("deleteMessage", {"chat_id": chat_id, "message_id": msg_id})
         
-    # 2. Отправляем полноценное инлайн-меню как в QuizBot
     await api_request("sendMessage", {
         "chat_id": chat_id,
         "text": start_text,
@@ -577,6 +571,109 @@ async def send_start_message(chat_id):
 
 # --- ОБРАБОТКА ОБНОВЛЕНИЙ ---
 async def handle_update(update):
+    # --- ОБРАБОТКА МГНОВЕННОГО INLINE MODE (СКРИНШОТЫ 1 и 2) ---
+    if "inline_query" in update:
+        inline_query = update["inline_query"]
+        iq_id = inline_query["id"]
+        user_id = inline_query["from"]["id"]
+        query = inline_query.get("query", "").strip()
+        
+        results = []
+        
+        # Если юзер нажал "Поделиться" и пришел запрос вида start_ID
+        if query.startswith("start_"):
+            quiz_id = query.replace("start_", "", 1)
+            quiz = QUIZZES.get(quiz_id)
+            if quiz:
+                num_q = len(quiz["questions"])
+                duration = quiz.get("duration", 30)
+                escaped_title = escape_html(quiz['title'])
+                
+                message_text = (
+                    f"🎲 <b>Тест «{escaped_title}»</b>\n"
+                    f"✒️ {num_q} вопросов  ·  ⏱ {duration} сек"
+                )
+                
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Пройти тест", "url": f"https://t.me/{BOT_USERNAME}?start=start_{quiz_id}"}],
+                        [{"text": "Отправить в группу", "url": f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"}],
+                        [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}]
+                    ]
+                }
+                
+                results.append({
+                    "type": "article",
+                    "id": quiz_id,
+                    "title": f"Тест «{quiz['title']}»",
+                    "description": f"✒️ {num_q} вопросов  ·  ⏱ {duration} сек",
+                    "input_message_content": {
+                        "message_text": message_text,
+                        "parse_mode": "HTML"
+                    },
+                    "reply_markup": reply_markup
+                })
+        else:
+            # Обычный вызов бота по юзернейму @bot_username в любом чате (Скриншот 2)
+            user_quizzes = {qid: q for qid, q in QUIZZES.items() if str(q.get("creator_id")) == str(user_id)}
+            
+            # Фильтр поиска по названию теста, если юзер ввёл текст
+            filtered_quizzes = []
+            for qid, q in user_quizzes.items():
+                if not query or query.lower() in q["title"].lower():
+                    filtered_quizzes.append((qid, q))
+                    
+            # 1. Ссылка-кнопка «Создать новый тест» в самый верх
+            results.append({
+                "type": "article",
+                "id": "create_new_quiz_inline",
+                "title": "Создать новый тест",
+                "description": "Запустить процесс создания нового теста в боте",
+                "input_message_content": {
+                    "message_text": f"➕ Нажмите на ссылку ниже, чтобы создать новый тест в боте:\n\nhttps://t.me/{BOT_USERNAME}?start=newquiz",
+                    "parse_mode": "HTML"
+                }
+            })
+            
+            # 2. Вывод результатов тестов
+            for qid, q in filtered_quizzes:
+                num_q = len(q["questions"])
+                duration = q.get("duration", 30)
+                escaped_title = escape_html(q['title'])
+                
+                message_text = (
+                    f"🎲 <b>Тест «{escaped_title}»</b>\n"
+                    f"✒️ {num_q} вопросов  ·  ⏱ {duration} сек"
+                )
+                
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "Пройти тест", "url": f"https://t.me/{BOT_USERNAME}?start=start_{qid}"}],
+                        [{"text": "Отправить в группу", "url": f"https://t.me/{BOT_USERNAME}?startgroup=start_{qid}"}],
+                        [{"text": "Поделиться", "switch_inline_query": f"start_{qid}"}]
+                    ]
+                }
+                
+                results.append({
+                    "type": "article",
+                    "id": qid,
+                    "title": q["title"],
+                    "description": f"{num_q} вопросов · {duration} сек",
+                    "input_message_content": {
+                        "message_text": message_text,
+                        "parse_mode": "HTML"
+                    },
+                    "reply_markup": reply_markup
+                })
+                
+        await api_request("answerInlineQuery", {
+            "inline_query_id": iq_id,
+            "results": results,
+            "cache_time": 0,
+            "is_personal": True
+        })
+        return
+
     if "poll_answer" in update:
         poll_answer = update["poll_answer"]
         poll_id = poll_answer["poll_id"]
@@ -592,7 +689,6 @@ async def handle_update(update):
             if game_type == "pm":
                 session = ACTIVE_PM_SESSIONS.get(chat_id)
                 if session and session["status"] == "RUNNING":
-                    # Сразу останавливаем таймер ожидания ответа
                     if session.get("timer_task"):
                         session["timer_task"].cancel()
                     
@@ -746,7 +842,7 @@ async def handle_update(update):
             await api_request("answerCallbackQuery", {"callback_query_id": cb_id})
             return
 
-        # Настройка таймера (длительности) при сохранении
+        # Настройка таймера при сохранении
         elif data.startswith("save_dur_"):
             duration = int(data.replace("save_dur_", "", 1))
             
@@ -821,11 +917,6 @@ async def handle_update(update):
                 
                 sharing_link = f"t.me/{BOT_USERNAME}?start=start_{quiz_id}"
                 group_url = f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"
-                
-                text_to_share = f"Пройди мой тест «{quiz['title']}»!"
-                encoded_text = urllib.parse.quote(text_to_share)
-                encoded_url = urllib.parse.quote(f"https://t.me/{BOT_USERNAME}?start=start_{quiz_id}")
-                share_url = f"https://t.me/share/url?url={encoded_url}&text={encoded_text}"
 
                 duration = quiz.get("duration", 30)
                 shuffle_mode = quiz.get("shuffle_mode", "all")
@@ -840,11 +931,12 @@ async def handle_update(update):
                     f"{sharing_link}"
                 )
                 
+                # Кнопка "Поделиться" теперь полностью системная нативная!
                 inline_kbd = {
                     "inline_keyboard": [
                         [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
                         [{"text": "Отправить в группу", "url": group_url}],
-                        [{"text": "Поделиться", "url": share_url}],
+                        [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}],
                         [{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}],
                         [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
                     ]
@@ -982,7 +1074,6 @@ async def handle_update(update):
             return
 
         # --- СЦЕНАРИЙ ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ ---
-        # Поддержка команды /stop в ЛС для соло-игр (с отменой таймеров)
         if chat_type == "private":
             if text == "/stop":
                 if chat_id in ACTIVE_PM_SESSIONS:
@@ -1013,11 +1104,6 @@ async def handle_update(update):
                 
                 sharing_link = f"t.me/{BOT_USERNAME}?start=start_{quiz_id}"
                 group_url = f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"
-                
-                text_to_share = f"Пройди мой тест «{quiz['title']}»!"
-                encoded_text = urllib.parse.quote(text_to_share)
-                encoded_url = urllib.parse.quote(f"https://t.me/{BOT_USERNAME}?start=start_{quiz_id}")
-                share_url = f"https://t.me/share/url?url={encoded_url}&text={encoded_text}"
 
                 duration = quiz.get("duration", 30)
                 shuffle_mode = quiz.get("shuffle_mode", "all")
@@ -1036,7 +1122,7 @@ async def handle_update(update):
                     "inline_keyboard": [
                         [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
                         [{"text": "Отправить в группу", "url": group_url}],
-                        [{"text": "Поделиться", "url": share_url}],
+                        [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}],
                         [{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}],
                         [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
                     ]
@@ -1055,7 +1141,6 @@ async def handle_update(update):
             return
 
         if user_id in USER_STATES and USER_STATES[user_id]["state"] == "ADDING_QUESTIONS":
-            # Шаг 1. Нажатие /done -> Предлагаем настроить таймер
             if text == "/done":
                 quiz_data = USER_STATES[user_id]["quiz_data"]
                 if not quiz_data["questions"]:
@@ -1107,51 +1192,56 @@ async def handle_update(update):
         # Текстовые команды в ЛС
         if text.startswith("/start"):
             parts = text.split(" ")
-            if len(parts) > 1 and parts[1].startswith("start_"):
-                quiz_id = parts[1].replace("start_", "")
-                quiz = QUIZZES.get(quiz_id)
-                if quiz:
-                    num_q = len(quiz["questions"])
-                    first_attempts = quiz.get("first_attempts", {})
-                    voters_count = len(first_attempts)
-                    
-                    sharing_link = f"t.me/{BOT_USERNAME}?start=start_{quiz_id}"
-                    group_url = f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"
-                    
-                    text_to_share = f"Пройди мой тест «{quiz['title']}»!"
-                    encoded_text = urllib.parse.quote(text_to_share)
-                    encoded_url = urllib.parse.quote(f"https://t.me/{BOT_USERNAME}?start=start_{quiz_id}")
-                    share_url = f"https://t.me/share/url?url={encoded_url}&text={encoded_text}"
-
-                    duration = quiz.get("duration", 30)
-                    shuffle_mode = quiz.get("shuffle_mode", "all")
-                    mode_icons = {"all": "все", "options": "варианты", "questions": "тесты", "none": "нет"}
-                    mode_text = mode_icons.get(shuffle_mode, "все")
-
-                    escaped_title = escape_html(quiz['title'])
-                    info_text = (
-                        f"<b>{escaped_title}</b>   {voters_count} человек ответили\n"
-                        f"✒️ {num_q} вопросов  ·  ⏱ {duration} сек  ·  🔀 {mode_text}\n\n"
-                        f"<b>External sharing link:</b>\n"
-                        f"{sharing_link}"
-                    )
-                    
-                    inline_kbd = {
-                        "inline_keyboard": [
-                            [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
-                            [{"text": "Отправить в группу", "url": group_url}],
-                            [{"text": "Поделиться", "url": share_url}],
-                            [{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}],
-                            [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
-                        ]
-                    }
+            if len(parts) > 1:
+                # Если нажали "Создать новый тест" из инлайн-списка
+                if parts[1] == "newquiz":
+                    USER_STATES[user_id] = {"state": "AWAITING_TITLE"}
                     await api_request("sendMessage", {
                         "chat_id": chat_id,
-                        "text": info_text,
-                        "parse_mode": "HTML",
-                        "reply_markup": inline_kbd
+                        "text": "📝 Введите название вашей новой викторины:"
                     })
                     return
+                # Если перешли по глубокой ссылке
+                elif parts[1].startswith("start_"):
+                    quiz_id = parts[1].replace("start_", "")
+                    quiz = QUIZZES.get(quiz_id)
+                    if quiz:
+                        num_q = len(quiz["questions"])
+                        first_attempts = quiz.get("first_attempts", {})
+                        voters_count = len(first_attempts)
+                        
+                        sharing_link = f"t.me/{BOT_USERNAME}?start=start_{quiz_id}"
+                        group_url = f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"
+
+                        duration = quiz.get("duration", 30)
+                        shuffle_mode = quiz.get("shuffle_mode", "all")
+                        mode_icons = {"all": "все", "options": "варианты", "questions": "тесты", "none": "нет"}
+                        mode_text = mode_icons.get(shuffle_mode, "все")
+
+                        escaped_title = escape_html(quiz['title'])
+                        info_text = (
+                            f"<b>{escaped_title}</b>   {voters_count} человек ответили\n"
+                            f"✒️ {num_q} вопросов  ·  ⏱ {duration} сек  ·  🔀 {mode_text}\n\n"
+                            f"<b>External sharing link:</b>\n"
+                            f"{sharing_link}"
+                        )
+                        
+                        inline_kbd = {
+                            "inline_keyboard": [
+                                [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
+                                [{"text": "Отправить в группу", "url": group_url}],
+                                [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}],
+                                [{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}],
+                                [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
+                            ]
+                        }
+                        await api_request("sendMessage", {
+                            "chat_id": chat_id,
+                            "text": info_text,
+                            "parse_mode": "HTML",
+                            "reply_markup": inline_kbd
+                        })
+                        return
 
             await send_start_message(chat_id)
             return
