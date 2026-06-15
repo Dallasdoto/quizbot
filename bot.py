@@ -14,7 +14,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # --- НАСТРОЙКА ПУТИ ДЛЯ НАДЁЖНОГО ХРАНЕНИЯ ДАННЫХ (RAILWAY VOLUME) ---
-# Если папка внешнего диска /app/data существует, сохраняем туда, иначе локально
 DB_DIR = "/app/data"
 if not os.path.exists(DB_DIR):
     try:
@@ -582,7 +581,6 @@ async def send_start_message(chat_id):
 
 # --- ОБРАБОТКА ОБНОВЛЕНИЙ ---
 async def handle_update(update):
-    # ПЕРЕНОСИМ GLOBAL QUIZZES В САМОЕ НАЧАЛО ФУНКЦИИ, ЧТОБЫ ИЗБЕЖАТЬ SYNTAXERROR
     global QUIZZES
 
     # --- ОБРАБОТКА МГНОВЕННОГО INLINE MODE ---
@@ -915,7 +913,7 @@ async def handle_update(update):
             await api_request("answerCallbackQuery", {"callback_query_id": cb_id})
             return
 
-        # Детальная карточка викторины
+        # Детальная карточка викторины (с динамическим разграничением прав)
         elif data.startswith("view_"):
             quiz_id = data.replace("view_", "", 1)
             quiz = QUIZZES.get(quiz_id)
@@ -940,15 +938,19 @@ async def handle_update(update):
                     f"{sharing_link}"
                 )
                 
-                inline_kbd = {
-                    "inline_keyboard": [
-                        [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
-                        [{"text": "Отправить в группу", "url": group_url}],
-                        [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}],
-                        [{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}],
-                        [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
-                    ]
-                }
+                # Защита: показываем кнопки редактирования и статистики ТОЛЬКО автору теста
+                is_creator = str(user_id) == str(quiz.get("creator_id"))
+                keyboard_rows = [
+                    [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
+                    [{"text": "Отправить в группу", "url": group_url}],
+                    [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}]
+                ]
+                if is_creator:
+                    keyboard_rows.append([{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}])
+                    keyboard_rows.append([{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}])
+                
+                inline_kbd = {"inline_keyboard": keyboard_rows}
+
                 await api_request("sendMessage", {
                     "chat_id": chat_id,
                     "text": info_text,
@@ -962,6 +964,15 @@ async def handle_update(update):
             quiz_id = data.replace("edit_menu_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
+                # Серверная защита на случай попытки обойти интерфейс
+                if str(user_id) != str(quiz.get("creator_id")):
+                    await api_request("answerCallbackQuery", {
+                        "callback_query_id": cb_id,
+                        "text": "❌ У вас нет прав на редактирование этого теста.",
+                        "show_alert": True
+                    })
+                    return
+
                 escaped_title = escape_html(quiz['title'])
                 edit_text = (
                     f"⚙️ <b>Редактирование викторины «{escaped_title}»</b>\n\n"
@@ -988,6 +999,15 @@ async def handle_update(update):
             quiz_id = data.replace("edit_add_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
+                # Серверная защита
+                if str(user_id) != str(quiz.get("creator_id")):
+                    await api_request("answerCallbackQuery", {
+                        "callback_query_id": cb_id,
+                        "text": "❌ У вас нет прав на редактирование этого теста.",
+                        "show_alert": True
+                    })
+                    return
+
                 USER_STATES[user_id] = {
                     "state": "ADDING_QUESTIONS",
                     "quiz_data": quiz
@@ -1005,6 +1025,15 @@ async def handle_update(update):
             quiz_id = data.replace("edit_clear_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
+                # Серверная защита
+                if str(user_id) != str(quiz.get("creator_id")):
+                    await api_request("answerCallbackQuery", {
+                        "callback_query_id": cb_id,
+                        "text": "❌ У вас нет прав на редактирование этого теста.",
+                        "show_alert": True
+                    })
+                    return
+
                 quiz["questions"] = []
                 save_quizzes(QUIZZES)
                 escaped_title = escape_html(quiz['title'])
@@ -1019,6 +1048,15 @@ async def handle_update(update):
             quiz_id = data.replace("stats_menu_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
+                # Серверная защита доступа к статистике
+                if str(user_id) != str(quiz.get("creator_id")):
+                    await api_request("answerCallbackQuery", {
+                        "callback_query_id": cb_id,
+                        "text": "❌ Статистика прохождений доступна только автору теста.",
+                        "show_alert": True
+                    })
+                    return
+
                 first_attempts = quiz.get("first_attempts", {})
                 escaped_title = escape_html(quiz['title'])
                 stats_text = f"📈 <b>Статистика прохождений теста «{escaped_title}» (первая попытка):</b>\n\n"
@@ -1048,7 +1086,17 @@ async def handle_update(update):
 
         elif data.startswith("delete_"):
             quiz_id = data.replace("delete_", "", 1)
-            if quiz_id in QUIZZES:
+            quiz = QUIZZES.get(quiz_id)
+            if quiz:
+                # Серверная защита при удалении
+                if str(user_id) != str(quiz.get("creator_id")):
+                    await api_request("answerCallbackQuery", {
+                        "callback_query_id": cb_id,
+                        "text": "❌ Удалить эту викторину может только её автор.",
+                        "show_alert": True
+                    })
+                    return
+
                 QUIZZES.pop(quiz_id)
                 save_quizzes(QUIZZES)
                 await api_request("sendMessage", {"chat_id": chat_id, "text": "✅ Тест успешно удален."})
@@ -1078,7 +1126,6 @@ async def handle_update(update):
                             try:
                                 new_data = file_res.json()
                                 save_quizzes(new_data)
-                                # ЗДЕСЬ УДАЛЕНА СТРОЧКА GLOBAL QUIZZES, ПОСКОЛЬКУ ОНА ОБЪЯВЛЕНА НА 359-Й СТРОКЕ (В НАЧАЛЕ HANDLE_UPDATE)
                                 QUIZZES = new_data
                                 await api_request("sendMessage", {
                                     "chat_id": chat_id,
@@ -1155,7 +1202,7 @@ async def handle_update(update):
                     })
                 return
 
-        # Поддержка команд /view_ID
+        # Поддержка команд /view_ID (с разграничением прав доступа к кнопкам)
         if text.startswith("/view_"):
             quiz_id = text.replace("/view_", "", 1).split("@")[0]
             quiz = QUIZZES.get(quiz_id)
@@ -1185,15 +1232,19 @@ async def handle_update(update):
                     f"{sharing_link}"
                 )
                 
-                inline_kbd = {
-                    "inline_keyboard": [
-                        [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
-                        [{"text": "Отправить в группу", "url": group_url}],
-                        [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}],
-                        [{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}],
-                        [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
-                    ]
-                }
+                # Разграничение прав: показываем автору полный набор кнопок, а другим только шэринг
+                is_creator = str(user_id) == str(quiz.get("creator_id"))
+                keyboard_rows = [
+                    [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
+                    [{"text": "Отправить в группу", "url": group_url}],
+                    [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}]
+                ]
+                if is_creator:
+                    keyboard_rows.append([{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}])
+                    keyboard_rows.append([{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}])
+                
+                inline_kbd = {"inline_keyboard": keyboard_rows}
+
                 await api_request("sendMessage", {
                     "chat_id": chat_id,
                     "text": info_text,
@@ -1268,7 +1319,7 @@ async def handle_update(update):
                         "text": "📝 Введите название вашей новой викторины:"
                     })
                     return
-                # Переход по глубокой ссылке
+                # Переход по глубокой ссылке (просмотр теста с разграничением прав)
                 elif parts[1].startswith("start_"):
                     quiz_id = parts[1].replace("start_", "")
                     quiz = QUIZZES.get(quiz_id)
@@ -1298,15 +1349,19 @@ async def handle_update(update):
                             f"{sharing_link}"
                         )
                         
-                        inline_kbd = {
-                            "inline_keyboard": [
-                                [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
-                                [{"text": "Отправить в группу", "url": group_url}],
-                                [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}],
-                                [{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}],
-                                [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
-                            ]
-                        }
+                        # Разграничение прав на инлайн-клавиатуре
+                        is_creator = str(user_id) == str(quiz.get("creator_id"))
+                        keyboard_rows = [
+                            [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
+                            [{"text": "Отправить в группу", "url": group_url}],
+                            [{"text": "Поделиться", "switch_inline_query": f"start_{quiz_id}"}]
+                        ]
+                        if is_creator:
+                            keyboard_rows.append([{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}])
+                            keyboard_rows.append([{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}])
+                        
+                        inline_kbd = {"inline_keyboard": keyboard_rows}
+
                         await api_request("sendMessage", {
                             "chat_id": chat_id,
                             "text": info_text,
