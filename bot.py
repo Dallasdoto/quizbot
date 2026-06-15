@@ -13,18 +13,15 @@ if not BOT_TOKEN:
 # URL API Telegram
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Хранилище данных (в реальном проекте используйте базу данных, здесь — для демо)
-quizzes: Dict[str, dict] = {}  # quiz_id -> {title, questions: [{text, options, correct}], author_id}
-user_quizzes: Dict[int, List[str]] = {}  # user_id -> [quiz_ids]
+# Хранилище данных
+quizzes: Dict[str, dict] = {}
+user_quizzes: Dict[int, List[str]] = {}
 
 # Активные групповые тесты
-active_group_tests: Dict[str, dict] = {}  # chat_id_quiz_id -> {...}
+active_group_tests: Dict[str, dict] = {}
 
 # Временные данные создания викторины
-temp_quiz_data: Dict[int, dict] = {}  # user_id -> {title, questions, awaiting_title}
-
-# Inline режим
-INLINE_MODE = True
+temp_quiz_data: Dict[int, dict] = {}
 
 async def send_message(chat_id, text, reply_markup=None, parse_mode="HTML"):
     """Универсальная отправка сообщения"""
@@ -76,6 +73,22 @@ async def send_quiz_card(chat_id, quiz_id, quiz_title, is_group=False):
     text = f"📚 <b>{quiz_title}</b>\n\n🎯 Количество вопросов: {len(quizzes[quiz_id]['questions'])}\n👤 Автор: {quizzes[quiz_id]['author_name']}"
     await send_message(chat_id, text, keyboard)
 
+async def send_message_with_response(chat_id, text, reply_markup=None, parse_mode="HTML"):
+    """Отправка сообщения с получением ответа"""
+    async with httpx.AsyncClient() as client:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode
+        }
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        
+        resp = await client.post(f"{API_URL}/sendMessage", json=payload)
+        if resp.status_code == 200:
+            return resp.json().get("result")
+    return None
+
 # ---------- Команды ----------
 async def start_command(chat_id, user_id, username):
     """Обработчик /start"""
@@ -88,7 +101,7 @@ async def start_command(chat_id, user_id, username):
         "resize_keyboard": True
     }
     
-    text = f"👋 Привет, {username}!\n\nЯ бот для создания и прохождения викторин.\nИспользуй кнопки ниже или команды:\n\n/newquiz - создать новую викторину\n/myquizzes - мои викторины\n/startquiz [название] - начать тест\n/stop - остановить текущий тест"
+    text = f"👋 Привет, {username}!\n\nЯ бот для создания и прохождения викторин.\n\n<b>Как создать тест через опросы:</b>\n1. Нажми «📝 Создать тест»\n2. Введи название\n3. Отправляй опросы (викторины) через скрепку ➕\n4. Можно отправить сколько угодно — 5, 10, 50 опросов\n5. Когда закончишь — напиши «Готово» или «2»\n\n<b>Или через текст:</b>\nВопрос\nВариант1, Вариант2, Вариант3\nНомер правильного ответа"
     
     await send_message(chat_id, text, keyboard)
 
@@ -97,24 +110,24 @@ async def newquiz_command(chat_id, user_id):
     temp_quiz_data[user_id] = {
         "title": None,
         "questions": [],
-        "awaiting_title": True
+        "awaiting_title": True,
+        "awaiting_questions": False
     }
     await send_message(chat_id, "📝 Давай создадим новую викторину!\n\nПришли название для теста (например: «Биоэтика 1-10»):")
 
 async def stop_command(chat_id, user_id):
     """Остановить текущий тест"""
-    # Поиск активного теста пользователя
     for test_id, test in active_group_tests.items():
-        if test["user_id"] == user_id:
+        if test.get("user_id") == user_id:
             test["active"] = False
             await send_message(chat_id, "⏹ Тест остановлен.")
             return
     
-    # Проверка пауз
     for test_id, test in active_group_tests.items():
-        if test["chat_id"] == chat_id and test.get("paused", False):
+        if test.get("chat_id") == chat_id and test.get("paused", False):
             test["paused"] = False
-            del test["pause_timer"]
+            if "pause_timer" in test:
+                del test["pause_timer"]
             await send_message(chat_id, "▶ Тест продолжен! Сейчас будет следующий вопрос.")
             await ask_question(test_id, test)
             return
@@ -128,11 +141,9 @@ async def myquizzes_command(chat_id, user_id):
         await send_message(chat_id, "У вас пока нет созданных тестов. Используйте /newquiz")
         return
     
-    keyboard = {
-        "inline_keyboard": []
-    }
+    keyboard = {"inline_keyboard": []}
     
-    for quiz_id in user_quiz_ids[:10]:  # Показываем не более 10
+    for quiz_id in user_quiz_ids[:10]:
         quiz = quizzes.get(quiz_id)
         if quiz:
             keyboard["inline_keyboard"].append([{"text": f"📌 {quiz['title']}", "callback_data": f"manage_{quiz_id}"}])
@@ -146,107 +157,33 @@ async def help_command(chat_id):
     """Помощь"""
     text = """🤖 <b>Помощь по боту</b>
 
+<b>Как создать тест (проще всего):</b>
+1. Нажми «Создать тест» или напиши /newquiz
+2. Введи название
+3. Отправляй <b>опросы (викторины)</b> через скрепку ➕
+   — Включи режим «Викторина»
+   — Отметь правильный ответ
+   — Отправь боту
+4. Можно отправить 5, 10 или 50 опросов — все добавятся!
+5. Когда закончишь — напиши «Готово» или «2»
+
+<b>Или текстом:</b>
+Текст вопроса
+Вариант1, Вариант2, Вариант3
+2
+
 <b>Команды:</b>
 /newquiz — создать тест
 /myquizzes — мои тесты
-/startquiz [название] — начать тест
 /stop — остановить текущий тест
-
-<b>Как создать тест:</b>
-1. Напиши /newquiz
-2. Введи название
-3. Отправляй вопросы (по одному)
-4. После вопроса — варианты через запятую
-5. В новом сообщении укажи правильный ответ (цифру 1,2,3...)
-6. Когда закончишь — нажми «Сохранить»
 
 <b>Групповой режим:</b>
 • Отправь тест в группу через карточку
 • 2+ участников нажимают «Участвовать»
 • На вопрос даётся 30 секунд
-• Если 2 вопроса подряд без ответа — тест приостанавливается
-• Нажми «Продолжить» чтобы возобновить
-
-<b>Статистика:</b>
-Показывает результаты всех участников"""
+• Если 2 вопроса подряд без ответа — тест приостанавливается"""
     
     await send_message(chat_id, text)
-
-# ---------- Обработка вопросов при создании ----------
-async def handle_quiz_creation(user_id, chat_id, text):
-    """Обработка создания теста"""
-    if user_id not in temp_quiz_data:
-        return False
-    
-    data = temp_quiz_data[user_id]
-    
-    # Ожидаем название
-    if data.get("awaiting_title"):
-        data["title"] = text
-        data["awaiting_title"] = False
-        await send_message(chat_id, f"✅ Название: «{text}»\n\nТеперь присылай вопросы.\n\n<b>Формат:</b>\nСначала текст вопроса, затем варианты через запятую, затем правильный ответ (номер)\n\nПример:\nВопрос: Какой цвет у неба?\nВарианты: Красный, Синий, Зеленый\nПравильный ответ: 2\n\nИли отправляй опрос (викторину) через скрепку ➕", parse_mode="HTML")
-        return True
-    
-    # Ожидаем добавление вопроса
-    # Проверяем, не является ли текст командой сохранения
-    if text.lower() in ["2", "сохранить", "готово"]:
-        if len(data["questions"]) == 0:
-            await send_message(chat_id, "❌ Добавь хотя бы один вопрос!")
-            return True
-        
-        # Сохраняем викторину
-        quiz_id = f"quiz_{datetime.now().timestamp()}"
-        quizzes[quiz_id] = {
-            "title": data["title"],
-            "questions": data["questions"],
-            "author_id": user_id,
-            "author_name": (await get_username(chat_id)) or str(user_id),
-            "created_at": datetime.now().isoformat()
-        }
-        
-        if user_id not in user_quizzes:
-            user_quizzes[user_id] = []
-        user_quizzes[user_id].append(quiz_id)
-        
-        del temp_quiz_data[user_id]
-        await send_message(chat_id, f"✅ Тест «{data['title']}» создан!\n\nИспользуй /myquizzes чтобы управлять.")
-        return True
-    
-    # Парсим вопрос и варианты (упрощенно)
-    lines = text.strip().split('\n')
-    if len(lines) >= 2:
-        question_text = lines[0]
-        # Пытаемся найти варианты (строкой с запятыми)
-        options_line = None
-        for line in lines[1:]:
-            if ',' in line or ';' in line:
-                options_line = line
-                break
-        
-        if options_line:
-            options = [opt.strip() for opt in options_line.replace(';', ',').split(',')]
-            # Ищем правильный ответ (последняя строка с цифрой)
-            correct_idx = None
-            for line in reversed(lines):
-                if line.strip().isdigit():
-                    correct_idx = int(line.strip()) - 1
-                    break
-            
-            if correct_idx is not None and 0 <= correct_idx < len(options):
-                data["questions"].append({
-                    "text": question_text,
-                    "options": options,
-                    "correct": options[correct_idx]
-                })
-                await send_message(chat_id, f"✅ Вопрос добавлен! (всего: {len(data['questions'])})\n\nПришли следующий вопрос или напиши 2 для сохранения")
-            else:
-                await send_message(chat_id, "❌ Не могу определить правильный ответ. Укажи номер ответа (1,2,3...) на отдельной строке")
-        else:
-            await send_message(chat_id, "❌ Неверный формат. Используй:\nВопрос\nВариант1, Вариант2, Вариант3\nНомер правильного ответа")
-    else:
-        await send_message(chat_id, "❌ Отправь вопрос и варианты в формате:\nТекст вопроса\nВариант1, Вариант2, Вариант3\n2")
-    
-    return True
 
 async def get_username(chat_id):
     """Получить username пользователя"""
@@ -258,9 +195,87 @@ async def get_username(chat_id):
                 return data["result"].get("username", "")
     return None
 
+# ---------- Обработка создания теста ----------
+async def handle_quiz_creation(user_id, chat_id, text, message_obj=None):
+    """Обработка создания теста (поддерживает опросы)"""
+    if user_id not in temp_quiz_data:
+        return False
+    
+    data = temp_quiz_data[user_id]
+    
+    # Ожидаем название
+    if data.get("awaiting_title"):
+        data["title"] = text
+        data["awaiting_title"] = False
+        data["awaiting_questions"] = True
+        await send_message(chat_id, f"✅ Название: «{text}»\n\nТеперь отправляй <b>опросы (викторины)</b> через скрепку ➕.\n\nМожно отправить сколько угодно — все добавятся.\nКогда закончишь — напиши «Готово» или «2»", parse_mode="HTML")
+        return True
+    
+    # Проверяем, не является ли текст командой сохранения
+    if text.lower() in ["2", "готово", "save", "done"]:
+        if len(data["questions"]) == 0:
+            await send_message(chat_id, "❌ Добавь хотя бы один вопрос (опрос)!")
+            return True
+        
+        # Сохраняем викторину
+        quiz_id = f"quiz_{int(datetime.now().timestamp())}"
+        quizzes[quiz_id] = {
+            "title": data["title"],
+            "questions": data["questions"],
+            "author_id": user_id,
+            "author_name": message_obj.get("from", {}).get("username", str(user_id)) if message_obj else str(user_id),
+            "created_at": datetime.now().isoformat()
+        }
+        
+        if user_id not in user_quizzes:
+            user_quizzes[user_id] = []
+        user_quizzes[user_id].append(quiz_id)
+        
+        del temp_quiz_data[user_id]
+        await send_message(chat_id, f"✅ Тест «{data['title']}» создан! Добавлено вопросов: {len(data['questions'])}\n\nИспользуй /myquizzes чтобы управлять.")
+        return True
+    
+    # Если нет — значит, ожидаем вопросы (но текст не подошел под сохранение)
+    return False  # Не обработано
+
+async def handle_poll(chat_id, user_id, poll, message_obj):
+    """Обработка опроса (викторины) — добавляет в текущий тест"""
+    if user_id not in temp_quiz_data:
+        await send_message(chat_id, "❌ Сначала начни создание теста через /newquiz")
+        return
+    
+    data = temp_quiz_data[user_id]
+    
+    # Проверяем, что это викторина (quiz)
+    if not poll.get("is_quiz", False):
+        await send_message(chat_id, "❌ Отправь <b>викторину</b> (включи режим «Викторина» при создании опроса)", parse_mode="HTML")
+        return
+    
+    # Извлекаем данные опроса
+    question_text = poll.get("question", "")
+    options = [opt["text"] for opt in poll.get("options", [])]
+    
+    # Находим правильный ответ
+    correct_option_id = poll.get("correct_option_id", -1)
+    correct_answer = options[correct_option_id] if 0 <= correct_option_id < len(options) else None
+    
+    if not question_text or not options or correct_answer is None:
+        await send_message(chat_id, "❌ Не удалось распознать опрос. Убедись, что это викторина с отмеченным правильным ответом.")
+        return
+    
+    # Добавляем вопрос
+    data["questions"].append({
+        "text": question_text,
+        "options": options,
+        "correct": correct_answer
+    })
+    
+    total = len(data["questions"])
+    await send_message(chat_id, f"✅ Вопрос добавлен! (всего в тесте: {total})\n\nОтправляй следующий опрос или напиши «Готово» для сохранения.")
+
 # ---------- Групповой тест ----------
 async def start_group_quiz(chat_id, quiz_id, user_id):
-    """Запуск группового теста (первый этап — сбор участников)"""
+    """Запуск группового теста"""
     quiz = quizzes.get(quiz_id)
     if not quiz:
         await send_message(chat_id, "❌ Тест не найден")
@@ -272,23 +287,21 @@ async def start_group_quiz(chat_id, quiz_id, user_id):
         await send_message(chat_id, "⚠ Тест уже активен в этом чате!")
         return
     
-    # Создаем запись теста
     active_group_tests[test_id] = {
         "chat_id": chat_id,
         "quiz_id": quiz_id,
         "quiz_title": quiz["title"],
         "questions": quiz["questions"],
         "current_q": 0,
-        "participants": {},  # user_id -> {username, score, answers}
+        "participants": {},
         "waiting_for_join": True,
         "join_message_id": None,
         "active": True,
         "no_answer_count": 0,
         "paused": False,
-        "user_id": user_id  # для stop
+        "user_id": user_id
     }
     
-    # Кнопка для участия
     keyboard = {
         "inline_keyboard": [
             [{"text": "✅ Участвовать", "callback_data": f"join_quiz_{test_id}"}]
@@ -300,11 +313,10 @@ async def start_group_quiz(chat_id, quiz_id, user_id):
     
     if msg:
         active_group_tests[test_id]["join_message_id"] = msg.get("message_id")
-        # Запускаем таймер на старт через 30 секунд или когда наберётся 2
         asyncio.create_task(auto_start_quiz(test_id))
 
 async def auto_start_quiz(test_id):
-    """Автоматический старт теста через 30 секунд или при наборе 2 участников"""
+    """Автоматический старт через 30 секунд"""
     await asyncio.sleep(30)
     test = active_group_tests.get(test_id)
     if test and test.get("waiting_for_join") and len(test["participants"]) >= 2:
@@ -312,7 +324,6 @@ async def auto_start_quiz(test_id):
         await send_message(test["chat_id"], "🎬 Начинаем викторину!")
         await ask_question(test_id, test)
     elif test and test.get("waiting_for_join"):
-        # Не набралось участников
         await send_message(test["chat_id"], "❌ Недостаточно участников для старта (нужно минимум 2). Тест отменён.")
         del active_group_tests[test_id]
 
@@ -331,13 +342,15 @@ async def ask_question(test_id, test):
     q = questions[q_idx]
     
     # Создаем кнопки-варианты
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": f"{chr(65+i)}. {opt}", "callback_data": f"answer_{test_id}_{i}"} for i, opt in enumerate(q["options"][:2])]
-        ]
-    }
-    if len(q["options"]) > 2:
-        keyboard["inline_keyboard"].append([{"text": f"{chr(65+i)}. {opt}", "callback_data": f"answer_{test_id}_{i}"} for i, opt in enumerate(q["options"][2:])])
+    keyboard = {"inline_keyboard": []}
+    row = []
+    for i, opt in enumerate(q["options"]):
+        row.append({"text": f"{chr(65+i)}. {opt[:30]}", "callback_data": f"answer_{test_id}_{i}"})
+        if len(row) == 2:
+            keyboard["inline_keyboard"].append(row)
+            row = []
+    if row:
+        keyboard["inline_keyboard"].append(row)
     
     text = f"📌 <b>{test['quiz_title']}</b>\nВопрос {q_idx+1}/{len(questions)}\n\n{q['text']}\n\n⏱ Время на ответ: 30 секунд"
     
@@ -346,8 +359,6 @@ async def ask_question(test_id, test):
         test["current_message_id"] = msg.get("message_id")
         test["answered_users"] = set()
         test["waiting_for_answer"] = True
-        
-        # Запускаем таймер 30 секунд
         test["timer"] = asyncio.create_task(question_timeout(test_id, test))
 
 async def question_timeout(test_id, test):
@@ -359,12 +370,10 @@ async def question_timeout(test_id, test):
     
     test["waiting_for_answer"] = False
     
-    # Проверяем, был ли ответ
     if len(test.get("answered_users", set())) == 0:
         test["no_answer_count"] = test.get("no_answer_count", 0) + 1
         await send_message(test["chat_id"], f"⏰ Никто не ответил на вопрос {test['current_q']+1}!")
         
-        # Если 2 вопроса подряд без ответа — пауза
         if test["no_answer_count"] >= 2:
             test["paused"] = True
             test["active"] = False
@@ -374,7 +383,6 @@ async def question_timeout(test_id, test):
     else:
         test["no_answer_count"] = 0
     
-    # Переход к следующему вопросу
     test["current_q"] += 1
     test["waiting_for_answer"] = False
     if test["current_q"] < len(test["questions"]):
@@ -390,7 +398,6 @@ async def end_group_quiz(test_id):
     
     test["active"] = False
     
-    # Подсчёт статистики
     stats = []
     for uid, data in test["participants"].items():
         stats.append((data.get("username", str(uid)), data.get("score", 0), len(test["questions"])))
@@ -403,29 +410,12 @@ async def end_group_quiz(test_id):
         results_text += f"{i}. {name} — {score}/{total} ({percent}%)\n"
     
     await send_message(test["chat_id"], results_text)
-    
     del active_group_tests[test_id]
-
-# Вспомогательная функция отправки с получением ответа
-async def send_message_with_response(chat_id, text, reply_markup=None, parse_mode="HTML"):
-    async with httpx.AsyncClient() as client:
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode
-        }
-        if reply_markup:
-            payload["reply_markup"] = json.dumps(reply_markup)
-        
-        resp = await client.post(f"{API_URL}/sendMessage", json=payload)
-        if resp.status_code == 200:
-            return resp.json().get("result")
-    return None
 
 # ---------- Callback обработчики ----------
 async def handle_callback(callback_data, callback_id, message, user_id, username):
     """Обработка нажатий на кнопки"""
-    # Старт теста из карточки
+    
     if callback_data.startswith("start_quiz_"):
         quiz_id = callback_data.replace("start_quiz_", "")
         if quiz_id in quizzes:
@@ -435,7 +425,6 @@ async def handle_callback(callback_data, callback_id, message, user_id, username
             await answer_callback(callback_id, "Тест не найден", True)
         return
     
-    # Присоединение к тесту
     if callback_data.startswith("join_quiz_"):
         test_id = callback_data.replace("join_quiz_", "")
         test = active_group_tests.get(test_id)
@@ -445,7 +434,6 @@ async def handle_callback(callback_data, callback_id, message, user_id, username
                 await answer_callback(callback_id, f"✅ {username}, вы участвуете!")
                 
                 if len(test["participants"]) >= 2:
-                    # Стартуем сразу
                     test["waiting_for_join"] = False
                     await send_message(test["chat_id"], "🎬 Набираем участников! Начинаем...")
                     await ask_question(test_id, test)
@@ -455,32 +443,36 @@ async def handle_callback(callback_data, callback_id, message, user_id, username
             await answer_callback(callback_id, "Набор уже завершён или тест не найден", True)
         return
     
-    # Ответ на вопрос
     if callback_data.startswith("answer_"):
         parts = callback_data.split("_")
-        test_id = f"{parts[1]}_{parts[2]}"
-        opt_idx = int(parts[3])
-        
-        test = active_group_tests.get(test_id)
-        if test and test.get("waiting_for_answer"):
-            if str(user_id) not in test.get("answered_users", set()):
-                test["answered_users"].add(str(user_id))
-                q_idx = test["current_q"]
-                q = test["questions"][q_idx]
-                is_correct = (q["options"][opt_idx] == q["correct"])
-                
-                if is_correct and str(user_id) in test["participants"]:
-                    test["participants"][str(user_id)]["score"] += 1
-                    await answer_callback(callback_id, "✅ Верно!")
-                elif not is_correct:
-                    await answer_callback(callback_id, f"❌ Неверно. Правильный ответ: {q['correct']}")
+        if len(parts) >= 4:
+            test_id = f"{parts[1]}_{parts[2]}"
+            opt_idx = int(parts[3])
+            
+            test = active_group_tests.get(test_id)
+            if test and test.get("waiting_for_answer"):
+                if str(user_id) not in test.get("answered_users", set()):
+                    test["answered_users"].add(str(user_id))
+                    q_idx = test["current_q"]
+                    if q_idx < len(test["questions"]):
+                        q = test["questions"][q_idx]
+                        is_correct = (q["options"][opt_idx] == q["correct"])
+                        
+                        if is_correct and str(user_id) in test["participants"]:
+                            test["participants"][str(user_id)]["score"] += 1
+                            await answer_callback(callback_id, "✅ Верно!")
+                        elif not is_correct:
+                            await answer_callback(callback_id, f"❌ Неверно. Правильный ответ: {q['correct'][:50]}")
+                        else:
+                            await answer_callback(callback_id, "❌ Вы не участвуете в этом тесте")
+                    else:
+                        await answer_callback(callback_id, "Вопрос не найден", True)
                 else:
-                    await answer_callback(callback_id, "❌ Вы не участвуете в этом тесте")
-        else:
-            await answer_callback(callback_id, "Время на ответ истекло или вопрос уже закрыт", True)
+                    await answer_callback(callback_id, "Вы уже отвечали на этот вопрос", True)
+            else:
+                await answer_callback(callback_id, "Время на ответ истекло", True)
         return
     
-    # Возобновление теста
     if callback_data.startswith("resume_"):
         test_id = callback_data.replace("resume_", "")
         test = active_group_tests.get(test_id)
@@ -493,19 +485,15 @@ async def handle_callback(callback_data, callback_id, message, user_id, username
             await answer_callback(callback_id, "Тест не на паузе", True)
         return
     
-    # Статистика
     if callback_data.startswith("stats_"):
         quiz_id = callback_data.replace("stats_", "")
         quiz = quizzes.get(quiz_id)
         if not quiz:
             await answer_callback(callback_id, "Тест не найден", True)
             return
-        
-        # Собираем статистику из завершённых тестов (в демо-версии просто сообщаем)
-        await answer_callback(callback_id, "📊 Статистика пока пуста. После групповых прохождений здесь будут результаты.", False)
+        await answer_callback(callback_id, "📊 Статистика по тесту появится после его прохождения в группе.", False)
         return
     
-    # Управление тестом
     if callback_data.startswith("manage_"):
         quiz_id = callback_data.replace("manage_", "")
         quiz = quizzes.get(quiz_id)
@@ -513,6 +501,7 @@ async def handle_callback(callback_data, callback_id, message, user_id, username
             keyboard = {
                 "inline_keyboard": [
                     [{"text": "📝 Пройти тест", "callback_data": f"start_quiz_{quiz_id}"}],
+                    [{"text": "📤 Отправить в группу", "callback_data": f"send_to_group_{quiz_id}"}],
                     [{"text": "📊 Статистика", "callback_data": f"stats_{quiz_id}"}],
                     [{"text": "🗑 Удалить", "callback_data": f"delete_{quiz_id}"}]
                 ]
@@ -521,7 +510,14 @@ async def handle_callback(callback_data, callback_id, message, user_id, username
             await answer_callback(callback_id)
         return
     
-    # Удаление
+    if callback_data.startswith("send_to_group_"):
+        quiz_id = callback_data.replace("send_to_group_", "")
+        quiz = quizzes.get(quiz_id)
+        if quiz:
+            await send_quiz_card(message["chat"]["id"], quiz_id, quiz["title"])
+            await answer_callback(callback_id, "✅ Карточка теста отправлена! Теперь перешли её в любую группу.")
+        return
+    
     if callback_data.startswith("delete_"):
         quiz_id = callback_data.replace("delete_", "")
         if quiz_id in quizzes:
@@ -535,10 +531,7 @@ async def handle_callback(callback_data, callback_id, message, user_id, username
 # ---------- Главный цикл ----------
 async def main():
     """Основной цикл получения обновлений"""
-    print("Bot started! Waiting for updates...")
-    
-    # Устанавливаем webhook (если нужно) или используем polling
-    # Для Railway лучше polling
+    print("🤖 Bot started! Waiting for updates...")
     
     offset = 0
     while True:
@@ -559,6 +552,11 @@ async def main():
                                 username = msg["from"].get("username", msg["from"].get("first_name", "User"))
                                 text = msg.get("text", "")
                                 
+                                # Проверяем, есть ли опрос в сообщении
+                                if "poll" in msg:
+                                    await handle_poll(chat_id, user_id, msg["poll"], msg)
+                                    continue
+                                
                                 # Команды
                                 if text == "/start":
                                     await start_command(chat_id, user_id, username)
@@ -575,9 +573,11 @@ async def main():
                                 elif text == "🗑 Удалить тест":
                                     await myquizzes_command(chat_id, user_id)
                                 elif user_id in temp_quiz_data:
-                                    await handle_quiz_creation(user_id, chat_id, text)
+                                    # Пытаемся обработать как команду сохранения или игнорируем
+                                    handled = await handle_quiz_creation(user_id, chat_id, text, msg)
+                                    if not handled:
+                                        await send_message(chat_id, "✏️ Отправь опрос (викторину) через скрепку ➕\nИли напиши «Готово» для сохранения теста.")
                                 else:
-                                    # Неизвестная команда
                                     await send_message(chat_id, "Неизвестная команда. Используй /help")
                             
                             # Обработка callback'ов
@@ -590,11 +590,6 @@ async def main():
                                     cb["from"]["id"],
                                     cb["from"].get("username", "User")
                                 )
-                            
-                            # Обработка inline запросов
-                            elif "inline_query" in update:
-                                # Для будущей реализации
-                                pass
                 else:
                     print(f"API error: {resp.status_code}")
         except Exception as e:
