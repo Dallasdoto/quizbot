@@ -22,7 +22,11 @@ BOT_USERNAME = "quizbot"
 
 client = httpx.AsyncClient()
 
-# --- ВСПУМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ РАНДОМИЗАЦИИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+def escape_html(text: str) -> str:
+    """Экранирует специальные HTML-символы для предотвращения ошибок парсинга Telegram."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
 def shuffle_question(q):
     """Перемешивает варианты ответов внутри вопроса, сохраняя правильный индекс."""
     options = list(q["options"])
@@ -100,9 +104,10 @@ async def start_pm_quiz(user_id, user_name, quiz_id, quiz_data):
         "scores": {"correct": 0, "total": 0},
         "user_name": user_name
     }
+    escaped_title = escape_html(quiz_data['title'])
     await api_request("sendMessage", {
         "chat_id": user_id,
-        "text": f"🚀 Начинаем прохождение теста <b>«{quiz_data['title']}»</b> соло. Отвечайте на вопросы ниже!",
+        "text": f"🚀 Начинаем прохождение теста <b>«{escaped_title}»</b> соло. Отвечайте на вопросы ниже!",
         "parse_mode": "HTML"
     })
     await send_next_pm_question(user_id)
@@ -146,7 +151,6 @@ async def finish_pm_quiz(user_id):
     total = session["scores"]["total"]
     percent = int((correct / total) * 100) if total > 0 else 0
 
-    # Запись первой попытки в статистику
     quiz = QUIZZES.get(quiz_id)
     if quiz:
         if "first_attempts" not in quiz:
@@ -161,8 +165,9 @@ async def finish_pm_quiz(user_id):
             }
             save_quizzes(QUIZZES)
 
+    escaped_title = escape_html(title)
     result_text = (
-        f"🏁 <b>Вы завершили тест «{title}»!</b>\n\n"
+        f"🏁 <b>Вы завершили тест «{escaped_title}»!</b>\n\n"
         f"🎯 Ваш результат: <b>{correct}/{total}</b> ({percent}%)\n"
     )
     await api_request("sendMessage", {
@@ -197,8 +202,9 @@ async def start_joining_phase(chat_id, quiz_id, quiz_data):
     }
 
     num_q = len(quiz_data["questions"])
+    escaped_title = escape_html(quiz_data['title'])
     intro_text = (
-        f"🎲 <b>Приготовьтесь пройти тест «{quiz_data['title']}»</b>\n\n"
+        f"🎲 <b>Приготовьтесь пройти тест «{escaped_title}»</b>\n\n"
         f"✒️ <b>{num_q} вопросов</b>\n"
         f"⏱ <b>30 секунд на вопрос</b>\n"
         f"📰 <b>Ответы видны участникам группы и автору теста</b>\n\n"
@@ -302,7 +308,8 @@ async def finish_quiz(chat_id):
 
     sorted_scores = sorted(scores.items(), key=lambda x: (x[1]["correct"], -x[1]["total"]), reverse=True)
 
-    result_text = f"🏁 <b>Тест «{title}» завершен!</b>\n\n📊 <b>Результаты:</b>\n"
+    escaped_title = escape_html(title)
+    result_text = f"🏁 <b>Тест «{escaped_title}» завершен!</b>\n\n📊 <b>Результаты:</b>\n"
     if not sorted_scores:
         result_text += "Никто не принял участие в викторине 😢"
     else:
@@ -314,7 +321,8 @@ async def finish_quiz(chat_id):
         for i, (user_id, data) in enumerate(sorted_scores):
             medal = medals[i] if i < 3 else "🔹"
             percent = int((data["correct"] / total_q) * 100) if total_q > 0 else 0
-            result_text += f"{medal} <b>{data['name']}</b> — {data['correct']}/{total_q} ({percent}%)\n"
+            escaped_name = escape_html(data["name"])
+            result_text += f"{medal} <b>{escaped_name}</b> — {data['correct']}/{total_q} ({percent}%)\n"
 
             if quiz:
                 str_u_id = str(user_id)
@@ -436,7 +444,6 @@ async def handle_update(update):
             return
 
         elif data == "cmd_myquizzes":
-            # Безопасный поиск ваших тестов независимо от типа ID в базе
             user_quizzes = {qid: q for qid, q in QUIZZES.items() if str(q.get("creator_id")) == str(user_id)}
             if not user_quizzes:
                 await api_request("sendMessage", {
@@ -468,7 +475,7 @@ async def handle_update(update):
 
         # Присоединиться к тесту в группе
         elif data.startswith("join_"):
-            quiz_id = data.split("_")[1]
+            quiz_id = data.replace("join_", "", 1)
             session = ACTIVE_SESSIONS.get(chat_id)
             if session and session["status"] == "JOINING":
                 session["ready_players"].add(user_id)
@@ -508,7 +515,7 @@ async def handle_update(update):
             return
 
         elif data.startswith("resume_"):
-            target_chat_id = int(data.split("_")[1])
+            target_chat_id = int(data.replace("resume_", "", 1))
             session = ACTIVE_SESSIONS.get(target_chat_id)
             if session and session["status"] == "PAUSED":
                 session["status"] = "RUNNING"
@@ -520,15 +527,16 @@ async def handle_update(update):
             return
 
         elif data.startswith("start_pm_"):
-            quiz_id = data.split("_")[2]
+            quiz_id = data.replace("start_pm_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
                 await start_pm_quiz(chat_id, user_name, quiz_id, quiz)
             await api_request("answerCallbackQuery", {"callback_query_id": cb_id})
             return
 
+        # Надежное извлечение ID викторины через replace
         elif data.startswith("view_"):
-            quiz_id = data.split("_")[1]
+            quiz_id = data.replace("view_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
                 num_q = len(quiz["questions"])
@@ -539,8 +547,9 @@ async def handle_update(update):
                 group_url = f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"
                 share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=start_{quiz_id}&text=Пройди%20мой%20тест%20«{quiz['title']}»!"
 
+                escaped_title = escape_html(quiz['title'])
                 info_text = (
-                    f"<b>{quiz['title']}</b>   {voters_count} человек ответили\n"
+                    f"<b>{escaped_title}</b>   {voters_count} человек ответили\n"
                     f"✒️ {num_q} вопросов  ·  ⏱ 30 сек  ·  🔀 все\n\n"
                     f"<b>External sharing link:</b>\n"
                     f"{sharing_link}"
@@ -555,7 +564,6 @@ async def handle_update(update):
                         [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
                     ]
                 }
-                
                 await api_request("sendMessage", {
                     "chat_id": chat_id,
                     "text": info_text,
@@ -566,11 +574,12 @@ async def handle_update(update):
             return
 
         elif data.startswith("edit_menu_"):
-            quiz_id = data.split("_")[2]
+            quiz_id = data.replace("edit_menu_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
+                escaped_title = escape_html(quiz['title'])
                 edit_text = (
-                    f"⚙️ <b>Редактирование викторины «{quiz['title']}»</b>\n\n"
+                    f"⚙️ <b>Редактирование викторины «{escaped_title}»</b>\n\n"
                     f"Выберите необходимое действие:"
                 )
                 inline_kbd = {
@@ -591,40 +600,43 @@ async def handle_update(update):
             return
 
         elif data.startswith("edit_add_"):
-            quiz_id = data.split("_")[2]
+            quiz_id = data.replace("edit_add_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
                 USER_STATES[user_id] = {
                     "state": "ADDING_QUESTIONS",
                     "quiz_data": quiz
                 }
+                escaped_title = escape_html(quiz['title'])
                 await api_request("sendMessage", {
                     "chat_id": chat_id,
-                    "text": f"📥 Пересылайте мне новые опросы. Они будут добавлены в конец теста <b>«{quiz['title']}»</b>.\n\nКогда закончите, отправьте /done.",
+                    "text": f"📥 Пересылайте мне новые опросы. Они будут добавлены в конец теста <b>«{escaped_title}»</b>.\n\nКогда закончите, отправьте /done.",
                     "parse_mode": "HTML"
                 })
             await api_request("answerCallbackQuery", {"callback_query_id": cb_id})
             return
 
         elif data.startswith("edit_clear_"):
-            quiz_id = data.split("_")[2]
+            quiz_id = data.replace("edit_clear_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
                 quiz["questions"] = []
                 save_quizzes(QUIZZES)
+                escaped_title = escape_html(quiz['title'])
                 await api_request("sendMessage", {
                     "chat_id": chat_id,
-                    "text": f"🧹 Все вопросы в тесте «{quiz['title']}» были стерты. Вы можете нажать «Добавить еще вопросы» для их повторного заполнения."
+                    "text": f"🧹 Все вопросы в тесте «{escaped_title}» были стерты. Вы можете нажать «Добавить еще вопросы» для их повторного заполнения."
                 })
             await api_request("answerCallbackQuery", {"callback_query_id": cb_id})
             return
 
         elif data.startswith("stats_menu_"):
-            quiz_id = data.split("_")[2]
+            quiz_id = data.replace("stats_menu_", "", 1)
             quiz = QUIZZES.get(quiz_id)
             if quiz:
                 first_attempts = quiz.get("first_attempts", {})
-                stats_text = f"📈 <b>Статистика прохождений теста «{quiz['title']}» (первая попытка):</b>\n\n"
+                escaped_title = escape_html(quiz['title'])
+                stats_text = f"📈 <b>Статистика прохождений теста «{escaped_title}» (первая попытка):</b>\n\n"
                 
                 if not first_attempts:
                     stats_text += "Этот тест пока никто не проходил."
@@ -634,7 +646,8 @@ async def handle_update(update):
                         medals = ["🥇", "🥈", "🥉"]
                         medal = medals[i] if i < 3 else "🔹"
                         percent = int((player["correct"] / player["total"]) * 100) if player["total"] > 0 else 0
-                        stats_text += f"{medal} <b>{player['name']}</b> — {player['correct']}/{player['total']} ({percent}%)  ·  <i>{player.get('date', '')}</i>\n"
+                        escaped_player_name = escape_html(player["name"])
+                        stats_text += f"{medal} <b>{escaped_player_name}</b> — {player['correct']}/{player['total']} ({percent}%)  ·  <i>{player.get('date', '')}</i>\n"
                 
                 inline_kbd = {
                     "inline_keyboard": [[{"text": "🔙 Назад", "callback_data": f"view_{quiz_id}"}]]
@@ -649,7 +662,7 @@ async def handle_update(update):
             return
 
         elif data.startswith("delete_"):
-            quiz_id = data.split("_")[1]
+            quiz_id = data.replace("delete_", "", 1)
             if quiz_id in QUIZZES:
                 QUIZZES.pop(quiz_id)
                 save_quizzes(QUIZZES)
@@ -684,16 +697,14 @@ async def handle_update(update):
             return
 
         # --- СЦЕНАРИЙ ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ ---
-        # Обработка добавления опросов
         if user_id in USER_STATES and USER_STATES[user_id]["state"] == "ADDING_QUESTIONS":
-            # Завершение добавления строго по /done
             if text == "/done":
                 quiz_data = USER_STATES[user_id]["quiz_data"]
                 quiz_id = quiz_data["quiz_id"]
                 
                 QUIZZES[quiz_id] = {
                     "title": quiz_data["title"],
-                    "creator_id": str(user_id), # Сохраняем creator_id в виде строки
+                    "creator_id": str(user_id),
                     "questions": quiz_data["questions"]
                 }
                 save_quizzes(QUIZZES)
@@ -744,125 +755,4 @@ async def handle_update(update):
                     group_url = f"https://t.me/{BOT_USERNAME}?startgroup=start_{quiz_id}"
                     share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}?start=start_{quiz_id}&text=Пройди%20мой%20тест%20«{quiz['title']}»!"
 
-                    info_text = (
-                        f"<b>{quiz['title']}</b>   {voters_count} человек ответили\n"
-                        f"✒️ {num_q} вопросов  ·  ⏱ 30 сек  ·  🔀 все\n\n"
-                        f"<b>External sharing link:</b>\n"
-                        f"{sharing_link}"
-                    )
-                    
-                    inline_kbd = {
-                        "inline_keyboard": [
-                            [{"text": "Пройти тест", "callback_data": f"start_pm_{quiz_id}"}],
-                            [{"text": "Отправить в группу", "url": group_url}],
-                            [{"text": "Поделиться", "url": share_url}],
-                            [{"text": "Редактировать", "callback_data": f"edit_menu_{quiz_id}"}],
-                            [{"text": "Статистика", "callback_data": f"stats_menu_{quiz_id}"}]
-                        ]
-                    }
-                    await api_request("sendMessage", {
-                        "chat_id": chat_id,
-                        "text": info_text,
-                        "parse_mode": "HTML",
-                        "reply_markup": inline_kbd
-                    })
-                    return
-
-            await send_start_message(chat_id)
-            return
-
-        elif text == "/newquiz":
-            USER_STATES[user_id] = {"state": "AWAITING_TITLE"}
-            await api_request("sendMessage", {
-                "chat_id": chat_id,
-                "text": "📝 Введите название вашей новой викторины:"
-            })
-            return
-
-        elif USER_STATES.get(user_id, {}).get("state") == "AWAITING_TITLE":
-            title = text.strip()
-            quiz_id = str(int(asyncio.get_event_loop().time() * 1000))
-            
-            USER_STATES[user_id] = {
-                "state": "ADDING_QUESTIONS",
-                "quiz_data": {
-                    "quiz_id": quiz_id,
-                    "title": title,
-                    "questions": []
-                }
-            }
-
-            instruction = (
-                f"🌟 <b>Викторина «{title}» начата!</b>\n\n"
-                f"📥 <b>Пакетный импорт включен:</b>\n"
-                f"Вы можете переслать мне сразу <b>много опросов (викторин)</b> из любого канала.\n"
-                f"Я автоматически разберу их и добавлю в тест.\n\n"
-                f"Когда закончите отправку, просто отправьте сообщение с командой /done."
-            )
-            await api_request("sendMessage", {
-                "chat_id": chat_id,
-                "text": instruction,
-                "parse_mode": "HTML"
-            })
-            return
-
-        elif text == "/myquizzes":
-            # Безопасный поиск ваших тестов независимо от типа ID в базе
-            user_quizzes = {qid: q for qid, q in QUIZZES.items() if str(q.get("creator_id")) == str(user_id)}
-            if not user_quizzes:
-                await api_request("sendMessage", {
-                    "chat_id": chat_id,
-                    "text": "📭 У вас пока нет созданных тестов. Нажмите /newquiz, чтобы начать."
-                })
-                return
-
-            list_text = "📚 <b>Ваши сохраненные викторины:</b>\nВыберите тест для просмотра:"
-            inline_kbd = {"inline_keyboard": []}
-            for qid, q in user_quizzes.items():
-                inline_kbd["inline_keyboard"].append([{"text": q["title"], "callback_data": f"view_{qid}"}])
-
-            await api_request("sendMessage", {
-                "chat_id": chat_id,
-                "text": list_text,
-                "parse_mode": "HTML",
-                "reply_markup": inline_kbd
-            })
-            return
-
-        elif text == "/help":
-            help_text = (
-                "📖 <b>Инструкция по использованию:</b>\n\n"
-                "1. Напишите /newquiz, укажите имя теста.\n"
-                "2. Перешлите боту опросы в формате «Викторина» (можно пересылать пакетно — сразу много штук).\n"
-                "3. Отправьте /done для окончания создания и сохранения.\n"
-                "4. Перейдите в раздел /myquizzes, выберите созданный тест и нажмите кнопку <b>«Пройти тест»</b> (для соло-игры в ЛС) или <b>«Отправить в группу»</b>.\n\n"
-                "Все вопросы и варианты ответов автоматически перемешиваются при каждом запуске!"
-            )
-            await api_request("sendMessage", {
-                "chat_id": chat_id,
-                "text": help_text,
-                "parse_mode": "HTML"
-            })
-            return
-
-# --- ГЛАВНЫЙ ЦИКЛ ОПРОСА TELEGRAM (LONG POLLING) ---
-async def main():
-    await fetch_bot_username()
-    offset = 0
-    logging.info("Polling запущен...")
-    while True:
-        try:
-            res = await api_request("getUpdates", {"offset": offset, "timeout": 20})
-            if res.get("ok"):
-                for update in res.get("result", []):
-                    offset = update["update_id"] + 1
-                    asyncio.create_task(handle_update(update))
-        except Exception as e:
-            logging.error(f"Ошибка в цикле запросов: {e}")
-        await asyncio.sleep(0.5)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Бот остановлен.")
+                    escaped_title = escape_html(quiz['title'])
