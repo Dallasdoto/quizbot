@@ -582,6 +582,10 @@ async def send_start_message(chat_id):
 
 # --- ОБРАБОТКА ОБНОВЛЕНИЙ ---
 async def handle_update(update):
+    # ПЕРЕНОСИМ GLOBAL QUIZZES В САМОЕ НАЧАЛО ФУНКЦИИ, ЧТОБЫ ИЗБЕЖАТЬ SYNTAXERROR
+    global QUIZZES
+
+    # --- ОБРАБОТКА МГНОВЕННОГО INLINE MODE ---
     if "inline_query" in update:
         inline_query = update["inline_query"]
         iq_id = inline_query["id"]
@@ -1074,7 +1078,7 @@ async def handle_update(update):
                             try:
                                 new_data = file_res.json()
                                 save_quizzes(new_data)
-                                global QUIZZES
+                                # ЗДЕСЬ УДАЛЕНА СТРОЧКА GLOBAL QUIZZES, ПОСКОЛЬКУ ОНА ОБЪЯВЛЕНА НА 359-Й СТРОКЕ (В НАЧАЛЕ HANDLE_UPDATE)
                                 QUIZZES = new_data
                                 await api_request("sendMessage", {
                                     "chat_id": chat_id,
